@@ -7,7 +7,7 @@ async def build_scope_headers(reader):
     headers = []
 
     while True:
-        header_line = await reader.readline()
+        header_line = await reader.readuntil(b"\r\n")
         header = header_line.rstrip()
         if not header:
             break
@@ -18,11 +18,7 @@ async def build_scope_headers(reader):
 
 
 async def build_scope(reader):
-    request_line = await reader.readline()
-    # Check if connection was closed by the client
-    if request_line == b"":
-        return {}
-
+    request_line = await reader.readuntil(b"\r\n")
     request = request_line.decode().rstrip()
     method, path, protocol = request.split(" ", 3)
     url = urlparse(path)
@@ -57,16 +53,17 @@ def build_http_headers(scope, event):
         [protocol, str(status.value).encode(), status.phrase.encode()]
     )
 
-    headers = [status_line + b"\r\n"]
+    headers = [status_line, b"\r\n"]
     for header_line in event["headers"]:
-        headers.append(b": ".join(header_line) + b"\r\n")
+        headers.append(b": ".join(header_line))
+        headers.append(b"\r\n")
     headers.append(b"\r\n")
 
     return headers
 
 
 async def handler(app, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    headers = []
+    response_headers = []
     scope = await build_scope(reader)
 
     async def receive():
@@ -79,17 +76,17 @@ async def handler(app, reader: asyncio.StreamReader, writer: asyncio.StreamWrite
         }
 
     async def send(event):
-        nonlocal headers
+        nonlocal response_headers
 
         # App's sending the response headers
         if event["type"] == "http.response.start":
-            headers = build_http_headers(scope, event)
+            response_headers = build_http_headers(scope, event)
         # App's sending the response body
         elif event["type"] == "http.response.body":
             # The headers should only be pushed once the body is received
-            if headers:
-                writer.writelines(headers)
-                headers = []
+            if response_headers:
+                writer.writelines(response_headers)
+                response_headers = []
 
             writer.write(event["body"])
             await writer.drain()
@@ -99,9 +96,8 @@ async def handler(app, reader: asyncio.StreamReader, writer: asyncio.StreamWrite
                 writer.close()
                 await writer.wait_closed()
 
-    if scope:
-        # Invoke the app!
-        await app(scope, receive, send)
+    # Invoke the app!
+    await app(scope, receive, send)
 
 
 async def run_server(app, host, port):
