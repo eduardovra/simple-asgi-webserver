@@ -103,51 +103,107 @@ async def http_handler(app, scope, reader, writer):
     await app(scope, receive, send)
 
 
+async def read_websocket_frame(reader):
+    # Read frame header
+    header = await reader.read(2)
+
+    unpacked = struct.unpack("<BB", header)
+    fin = (unpacked[0] & (1 << 7)) > 0
+    opcode = unpacked[0] & 0x0F
+    mask = (unpacked[1] & (1 << 7)) > 0
+    payload_len = unpacked[1] & 0x7F
+
+    if payload_len == 126:
+        l = await reader.read(2)
+        u = struct.unpack("<H", l)
+        payload_len = u[0]
+    elif payload_len == 127:
+        l = await reader.read(8)
+        u = struct.unpack("<Q", l)
+        payload_len = u[0]
+
+    if mask:
+        masking_key = await reader.read(4)
+
+    payload = await reader.read(payload_len)
+
+    if mask:
+        unmasked = bytearray()
+        for i in range(len(payload)):
+            unmasked.append(payload[i] ^ masking_key[i % 4])
+        payload = bytes(unmasked)
+
+    return fin, opcode, payload
+
+
+def build_upgrade_response(scope):
+    # Complete HTTP handshake and upgrade to websocket connection
+    key = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+    dict_headers = scope["server.dict_headers"]
+    i = dict_headers["sec-websocket-key"]
+    h = hashlib.sha1(f"{i}{key}".encode())
+    accept = base64.b64encode(h.digest()).decode()
+
+    headers = [
+        "HTTP/1.1 101 Switching Protocols",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        f"Sec-WebSocket-Accept: {accept}",
+        "",
+    ]
+
+    return [f"{line}\r\n".encode() for line in headers]
+
+
+def build_websocket_frame(event):
+    frame = bytearray()
+    payload = b""
+
+    if event.get("text") is not None:
+        payload = event["text"].encode()
+        frame.extend(bytes([(1 << 7) | 1]))  # opcode 1 + FIN
+    elif event.get("bytes") is not None:
+        payload = event["bytes"]
+        frame.extend(bytes([(1 << 7) | 2]))  # opcode 2 + FIN
+
+    # Send payload length
+    if len(payload) <= 125:
+        frame.extend(bytes([len(payload)]))
+    elif len(payload) < 0xFFFF:
+        l = len(payload).to_bytes(2, "big")
+        frame.extend(bytes([126]) + l)
+    else:
+        l = len(payload).to_bytes(8, "big")
+        frame.extend(bytes([127]) + l)
+
+    frame.extend(payload)
+
+    return frame
+
+
 async def websocket_handler(app, scope, reader, writer):
     connect_sent = False
+    fragmented_payload = {}
 
     async def receive():
         nonlocal connect_sent
+        nonlocal fragmented_payload
 
         if not connect_sent:
             connect_sent = True
             return {"type": "websocket.connect"}
 
-        # Read frame header
-        header = await reader.read(2)
+        fin, opcode, payload = await read_websocket_frame(reader)
 
-        unpacked = struct.unpack("<BB", header)
-        fin = (unpacked[0] & (1 << 7)) > 0
-        opcode = unpacked[0] & 0x0F
-        mask = (unpacked[1] & (1 << 7)) > 0
-        payload_len = unpacked[1] & 0x7F
-
-        if payload_len == 126:
-            l = await reader.read(2)
-            u = struct.unpack("<H", l)
-            payload_len = u[0]
-        elif payload_len == 127:
-            l = await reader.read(8)
-            u = struct.unpack("<Q", l)
-            payload_len = u[0]
-
-        if mask:
-            masking_key = await reader.read(4)
-
-        payload = await reader.read(payload_len)
-
-        if mask:
-            unmasked = bytearray()
-            for i in range(len(payload)):
-                unmasked.append(payload[i] ^ masking_key[i % 4])
-            payload = bytes(unmasked)
-
-        event = {"type": "websocket.receive"}
-
-        if opcode == 1:
-            event["text"] = payload.decode()  # TODO encoding ??
+        if opcode == 0:
+            if "text" in fragmented_payload:
+                fragmented_payload["text"] += payload.decode()
+            else:
+                fragmented_payload["bytes"] += payload
+        elif opcode == 1:
+            fragmented_payload = {"text": payload.decode()}
         elif opcode == 2:
-            event["bytes"] = payload
+            fragmented_payload = {"bytes": payload}
         elif opcode == 8:
             close_code = 1005  # Default
             if len(payload):
@@ -155,50 +211,26 @@ async def websocket_handler(app, scope, reader, writer):
                 close_code = u[0]
             return {"type": "websocket.disconnect", "code": close_code}
 
-        return event
+        if fin:
+            event = {"type": "websocket.receive", **fragmented_payload}
+            return event
+
+        # Recurse to fetch all fragments
+        return await receive()
 
     async def send(event):
         if event["type"] == "websocket.accept":
-            # Complete HTTP handshake and upgrade to websocket connection
-            key = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-            dict_headers = scope["server.dict_headers"]
-            i = dict_headers["sec-websocket-key"]
-            h = hashlib.sha1(f"{i}{key}".encode())
-            accept = base64.b64encode(h.digest()).decode()
-
-            headers = [
-                "HTTP/1.1 101 Switching Protocols",
-                "Upgrade: websocket",
-                "Connection: Upgrade",
-                f"Sec-WebSocket-Accept: {accept}",
-                "",
-            ]
-
-            writer.writelines([f"{line}\r\n".encode() for line in headers])
+            # App's is requesting to accept the connection request
+            response = build_upgrade_response(scope)
+            writer.writelines(response)
             await writer.drain()
         elif event["type"] == "websocket.send":
-            payload = b""
-
-            if "text" in event:
-                payload = event["text"].encode()
-                writer.write(bytes([(1 << 7) | 1]))  # opcode 1
-            elif "bytes" in event:
-                payload = event["bytes"]
-                writer.write(bytes([(1 << 7) | 2]))  # opcode 2
-
-            # Send payload length
-            if len(payload) <= 125:
-                writer.write(bytes([len(payload)]))
-            elif len(payload) < 0xFFFF:
-                l = len(payload).to_bytes(2, "big")
-                writer.write(bytes([126]) + l)
-            else:
-                l = len(payload).to_bytes(8, "big")
-                writer.write(bytes([127]) + l)
-
-            writer.write(payload)
+            # App's sending data
+            frame = build_websocket_frame(event)
+            writer.write(frame)
             await writer.drain()
         elif event["type"] == "websocket.close":
+            # App's requesting to close the connection
             code = event.get("code", 1000)
             writer.write(bytes([1 << 7 | 8]))  # opcode 8
             writer.write(bytes([2]) + code.to_bytes(2, "big"))
