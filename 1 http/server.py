@@ -46,14 +46,11 @@ def get_content_length(scope):
 
 
 def build_http_headers(scope, event):
-    http_version = scope["http_version"].encode()
-    protocol = b"HTTP/" + http_version
+    http_version = scope["http_version"]
     status = HTTPStatus(event["status"])
-    status_line = b" ".join(
-        [protocol, str(status.value).encode(), status.phrase.encode()]
-    )
+    status_line = f"HTTP/{http_version} {status.value} {status.phrase}\r\n"
 
-    headers = [status_line, b"\r\n"]
+    headers = [status_line.encode()]
     for header_line in event["headers"]:
         headers.append(b": ".join(header_line))
         headers.append(b"\r\n")
