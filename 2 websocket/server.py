@@ -128,31 +128,28 @@ async def read_websocket_frame(reader):
     payload = await reader.read(payload_len)
 
     if mask:
-        unmasked = bytearray()
-        for i in range(len(payload)):
-            unmasked.append(payload[i] ^ masking_key[i % 4])
-        payload = bytes(unmasked)
+        payload = bytes(payload[i] ^ masking_key[i % 4] for i in range(len(payload)))
 
     return fin, opcode, payload
 
 
 def build_upgrade_response(scope):
-    # Complete HTTP handshake and upgrade to websocket connection
-    key = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+    guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
     dict_headers = scope["server.dict_headers"]
-    i = dict_headers["sec-websocket-key"]
-    h = hashlib.sha1(f"{i}{key}".encode())
-    accept = base64.b64encode(h.digest()).decode()
+    key = dict_headers["sec-websocket-key"]
+    key_hash = hashlib.sha1(f"{key}{guid}".encode())
+    accept = base64.b64encode(key_hash.digest())
 
+    # Complete HTTP handshake and upgrade to websocket connection
     headers = [
-        "HTTP/1.1 101 Switching Protocols",
-        "Upgrade: websocket",
-        "Connection: Upgrade",
-        f"Sec-WebSocket-Accept: {accept}",
-        "",
+        b"HTTP/1.1 101 Switching Protocols\r\n",
+        b"Upgrade: websocket\r\n",
+        b"Connection: Upgrade\r\n",
+        b"Sec-WebSocket-Accept: " + accept + b"\r\n",
+        b"\r\n",
     ]
 
-    return [f"{line}\r\n".encode() for line in headers]
+    return headers
 
 
 def build_websocket_frame(event):
