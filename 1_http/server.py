@@ -51,7 +51,7 @@ def build_http_headers(scope, event):
     status_line = f"HTTP/{http_version} {status.value} {status.phrase}\r\n"
 
     headers = [status_line.encode()]
-    for header_line in event["headers"]:
+    for header_line in event.get("headers", []):
         headers.append(b": ".join(header_line))
         headers.append(b"\r\n")
     headers.append(b"\r\n")

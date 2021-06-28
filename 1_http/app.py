@@ -1,5 +1,6 @@
-import server as uvicorn
 from fastapi import FastAPI
+
+import server as uvicorn
 
 app = FastAPI()
 
