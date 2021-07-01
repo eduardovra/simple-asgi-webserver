@@ -16,8 +16,9 @@ async def build_scope_headers(reader):
         if not header:
             break
         key, value = header.split(b": ", 1)
-        headers.append([key.lower(), value])
-        dict_headers[key.lower().decode()] = value.decode()
+        key = key.lower()
+        headers.append([key, value])
+        dict_headers[key.decode()] = value.decode()
 
     return headers, dict_headers
 
@@ -41,10 +42,13 @@ async def build_scope(reader):
     }
 
     if (
-        "Upgrade" in dict_headers.get("connection", "")
+        method == "GET"
+        and "Upgrade" in dict_headers.get("connection", "")
         and dict_headers.get("upgrade") == "websocket"
     ):
-        scope.update({"type": "websocket"})
+        sec_websocket_protocol = dict_headers.get("sec-websocket-protocol", "")
+        subprotocols = [proto.strip() for proto in sec_websocket_protocol.split(",")]
+        scope.update({"type": "websocket", "subprotocols": subprotocols})
     else:
         scope.update({"type": "http", "method": method})
 
@@ -207,6 +211,8 @@ async def websocket_handler(app, scope, reader, writer):
                 u = struct.unpack(">H", payload)
                 close_code = u[0]
             return {"type": "websocket.disconnect", "code": close_code}
+        else:
+            raise Exception(f"Opcode not implemented: {opcode}")
 
         if fin:
             event = {"type": "websocket.receive", **fragmented_payload}
