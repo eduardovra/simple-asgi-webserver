@@ -162,10 +162,10 @@ def build_websocket_frame(event):
 
     if event.get("text") is not None:
         payload = event["text"].encode()
-        frame.extend(bytes([(1 << 7) | 1]))  # opcode 1 + FIN
+        frame.extend(bytes([(1 << 7) | 1]))  # FIN=1 + opcode=1
     elif event.get("bytes") is not None:
         payload = event["bytes"]
-        frame.extend(bytes([(1 << 7) | 2]))  # opcode 2 + FIN
+        frame.extend(bytes([(1 << 7) | 2]))  # FIN=1 + opcode=2
 
     # Send payload length
     if len(payload) <= 125:
@@ -184,11 +184,9 @@ def build_websocket_frame(event):
 
 async def websocket_handler(app, scope, reader, writer):
     connect_sent = False
-    fragmented_payload = {}
 
     async def receive():
         nonlocal connect_sent
-        nonlocal fragmented_payload
 
         if not connect_sent:
             connect_sent = True
@@ -196,15 +194,10 @@ async def websocket_handler(app, scope, reader, writer):
 
         fin, opcode, payload = await read_websocket_frame(reader)
 
-        if opcode == 0:
-            if "text" in fragmented_payload:
-                fragmented_payload["text"] += payload.decode()
-            else:
-                fragmented_payload["bytes"] += payload
-        elif opcode == 1:
-            fragmented_payload = {"text": payload.decode()}
+        if opcode == 1:
+            event = {"type": "websocket.receive", "text": payload.decode()}
         elif opcode == 2:
-            fragmented_payload = {"bytes": payload}
+            event = {"type": "websocket.receive", "bytes": payload}
         elif opcode == 8:
             close_code = 1005  # Default
             if len(payload):
@@ -214,12 +207,10 @@ async def websocket_handler(app, scope, reader, writer):
         else:
             raise Exception(f"Opcode not implemented: {opcode}")
 
-        if fin:
-            event = {"type": "websocket.receive", **fragmented_payload}
-            return event
+        if not fin:
+            raise Exception("Fragmented frames not supported")
 
-        # Recurse to fetch all fragments
-        return await receive()
+        return event
 
     async def send(event):
         if event["type"] == "websocket.accept":
